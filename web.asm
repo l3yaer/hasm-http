@@ -26,8 +26,8 @@ global _start:
 %define O_WRONLY 1
 %define O_RDWR 2
 
-%define LSEEK_END 2
-%define LSEEK_SET 0
+%define SEEK_END 2
+%define SEEK_SET 0
 
 %define PROT_READ 1
 %define PROT_WRITE 2
@@ -36,15 +36,9 @@ global _start:
 
 section .text
 print_string:
-    push	rax
-    push	rdi
-
     mov	rax, SYS_WRITE
     mov	rdi, STDOUT
     syscall
-
-    pop	rdi
-    pop	rax
     ret
 
 quit:
@@ -61,49 +55,57 @@ error_quit:
     mov	rdi, 1
     syscall
 
-    ;TODO: use stack instead of filed
 fopen:
+    push	rbp
+    mov	rbp, rsp
+    sub	rsp, 48
 .openfile:
     mov	rax, SYS_OPEN
     mov	rdi, filepath
     mov	rsi, O_RDONLY
     syscall
-    mov	[filed], rax
+    mov	[rbp-8], rax        ;file descriptor
     cmp	rax, 0
     jle	.end
 .getsize:
     mov	rax, SYS_LSEEK
-    mov	rdi, [filed]
+    mov	rdi, [rbp-8]
     mov	rsi, 0
-    mov	rdx, LSEEK_END
+    mov	rdx, SEEK_END
     syscall
-    mov	[filelen], rax
+    mov	[rbp-16], rax       ;file size
     cmp	rax, 0
     jle	.end
     mov	rax, SYS_LSEEK
-    mov	rdx, LSEEK_SET
+    mov	rdx, SEEK_SET
     syscall
 .alloc:
     mov	rax, SYS_MMAP
     xor	rdi, rdi
-    mov	rsi, [filelen]
+    mov	rsi, [rbp-16]
     mov	rdx, PROT_READ | PROT_WRITE
     mov	r10, MAP_PRIVATE | MAP_ANONYMOUS
     mov	r8, -1
     xor	r9, r9
     syscall
-    mov	rsi, rax
+    mov	[rbp-24], qword rax       ;file contents
 .read:
     mov	rax, SYS_READ
-    mov	rdi, [filed]
-    mov	rdx, [filelen]
+    mov	rdi, [rbp-8]
+    mov	rsi, qword [rbp-24]
+    mov	rdx, [rbp-16]
     syscall
-    mov	[fileb], rsi
 .close:
     mov	rax, SYS_CLOSE
-    mov	rdi, [filed]
+    mov	rdi, [rbp-8]
     syscall
 .end:
+    mov	rax, [rbp-16]
+    mov	rdx, qword [rbp-24]
+    mov	rsp, rbp
+    pop	rbp
+    mov	[filelen], rax
+    mov	[fileb], qword rdx
     ret
 
 socket:
@@ -116,6 +118,7 @@ socket:
 
 sockopt:
     mov	rax, SYS_SOCKOPT
+    mov	rdi, [sfd]
     mov	rsi, SOL_SOCKET
     mov	rdx, SO_REUSEADDR
     mov	r10, opt
@@ -124,15 +127,13 @@ sockopt:
     ret
 
 bind:
-    mov	rax, [port]
+    mov	rax, 8000
     xchg	al, ah
-    mov	[server.sin_port], eax
-    mov	[server.sin_family], word AF_INET
-    mov	[server.sin_addr], dword 0
+    mov [sa + sin_port], eax
 
     mov	rax, SYS_BIND
     mov	rdi, [sfd]
-    mov	rsi, server
+    mov	rsi, sa
     mov	rdx, 16
     syscall
     ret
@@ -147,8 +148,8 @@ listen:
 accept:
     mov	rax, SYS_ACCEPT
     mov	rdi, [sfd]
-    mov	rsi, server
-    mov	rdx, serverlen
+    xor	rsi, rsi
+    xor	rdx, rdx
     syscall
     ret
 
@@ -163,17 +164,18 @@ close:
     ret
 
 _start:
+
+    call	fopen
+
     call	socket
     mov	[sfd], rax
     cmp	rax, 0
     jle	error_quit
 
-    mov	rdi, [sfd]
     call	sockopt
     cmp	rax, 0
     jne	error_quit
 
-    mov	[port], word 8000
     call	bind
     cmp	rax, 0
     jne	error_quit
@@ -182,12 +184,6 @@ _start:
     cmp	rax, 0
     jne	error_quit
 
-    call	fopen
-    mov	rsi, [fileb]
-    mov	rdx, [filelen]
-    call	print_string
-
-    mov	[serverlen], dword 16
 client_loop:
     call	accept
     cmp	rax, 0
@@ -195,41 +191,41 @@ client_loop:
 
     mov	[client], rax
 
-    mov	rsi, msg
-    mov	rdx, len
+    mov	rsi, [fileb]
+    mov	rdx, [filelen]
     mov	rdi, [client]
-    call write
+    call	write
 
     mov	rdi, [client]
     call	close
 
-    jmp	client_loop
+    mov	rdi, [sfd]
+    call	close
 
     jmp	quit
 
 section .data
-msg: db "Khello", 10
-len: equ $-msg
 errormsg: db "Failed to create socket", 10
 errorlen: equ $-errormsg
 
 filepath: db "./index.html", 0
 
-section .bss
-sfd: RESD 1
-opt: RESQ 1
-port: RESW 1
-client: RESD 1
+struc sockaddr_in
+sin_family: resw 1
+sin_port:   resw 1
+sin_addr:   resd 1
+endstruc
 
-filed: RESW 1
+sa: istruc sockaddr_in
+at sin_family, dw AF_INET
+at sin_port,   dw 8000
+at sin_addr,   dd 0 ;INADDR_ANY
+iend
+
+section .bss
+sfd: RESQ 1
+opt: RESQ 1
+client: RESQ 1
+
 fileb: RESQ 1
 filelen: RESW 1
-
-
-buffer: resb 1024
-
-server:
-.sin_family: RESW 1
-.sin_port: RESW 1
-.sin_addr: RESD 1
-serverlen: RESD 1
